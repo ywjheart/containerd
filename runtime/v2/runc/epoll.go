@@ -82,6 +82,10 @@ func (e *epoller) run(ctx context.Context) {
 }
 
 func (e *epoller) add(id string, cg cgroups.Cgroup) error {
+	// added by yew: cgroupv2 doesn't have this event
+	if cgroups.CgroupVersion.Memory.Version != 1 {
+		return nil
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	fd, err := cg.OOMEventFD()

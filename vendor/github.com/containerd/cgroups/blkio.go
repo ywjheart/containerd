@@ -30,8 +30,14 @@ import (
 )
 
 func NewBlkio(root string) *blkioController {
-	return &blkioController{
-		root: filepath.Join(root, string(Blkio)),
+	if CgroupVersion.Blkio.Version == 1 {
+		return &blkioController{
+			root: filepath.Join(root, string(Blkio)),
+		}
+	} else {
+		return &blkioController{
+			root: CgroupVersion.V2Root,
+		}
 	}
 }
 
@@ -84,6 +90,80 @@ func (b *blkioController) Stat(path string, stats *Metrics) error {
 			entry: &stats.Blkio.IoServiceBytesRecursive,
 		},
 	}
+	// cgroupv2 io.stat is quite different from cgroupv1 blkio
+	if CgroupVersion.Blkio.Version == 2 {
+		// get device map 8:0 -> sda
+		f, err := os.Open("/proc/diskstats")
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		devices, err := getDevices(f)
+		if err != nil {
+			return err
+		}
+
+		// parse io.stat
+		cnt, err := ioutil.ReadFile(filepath.Join(b.Path(path), "io.stat"))
+		if err != nil {
+			return err
+		}
+		fields := strings.Split(string(cnt)," ")
+		if len(fields) != 5 {
+			return fmt.Errorf("Unknown io.stat format, %v", string(cnt))
+		}
+		devs := strings.Split(fields[0],":")
+		if len(devs) != 2 {
+			return fmt.Errorf("Unknown io.stat format, dev, %v", string(cnt))
+		}
+		major, err := strconv.ParseUint(devs[0], 10, 64)
+		if err != nil {
+			return err
+		}
+		minor, err := strconv.ParseUint(devs[1], 10, 64)
+		if err != nil {
+			return err
+		}
+
+		for _,field := range fields {
+			kv := strings.Split(field,"=")
+			if len(kv) != 2 {
+				continue
+			}
+			switch kv[0] {
+			case "rbytes":
+				v, err := strconv.ParseUint(kv[1], 10, 64)
+				if err != nil {
+					continue
+				}
+				*settings[1].entry = append(*settings[1].entry, &BlkIOEntry{
+					Device: devices[deviceKey{major, minor}],
+					Major:  major,
+					Minor:  minor,
+					Op:     "read",
+					Value:  v,
+				})
+			case "wbytes":
+				v, err := strconv.ParseUint(kv[1], 10, 64)
+				if err != nil {
+					continue
+				}
+				*settings[1].entry = append(*settings[1].entry, &BlkIOEntry{
+					Device: devices[deviceKey{major, minor}],
+					Major:  major,
+					Minor:  minor,
+					Op:     "write",
+					Value:  v,
+				})
+			case "rios":
+			case "wios":
+			}
+		}
+
+		return nil
+	}
+
 	// Try to read CFQ stats available on all CFQ enabled kernels first
 	if _, err := os.Lstat(filepath.Join(b.Path(path), fmt.Sprintf("blkio.io_serviced_recursive"))); err == nil {
 		settings = append(settings,

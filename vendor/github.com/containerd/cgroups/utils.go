@@ -26,12 +26,55 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"syscall"
 
 	units "github.com/docker/go-units"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 var isUserNS = runningInUserNS()
+
+type CgroupControllerInfo struct {
+	Version int
+}
+
+type CgroupVersionInfo struct {
+	Blkio CgroupControllerInfo
+	Memory CgroupControllerInfo
+	V2Root string
+}
+
+var CgroupVersion CgroupVersionInfo
+
+func init() {
+	if PathExists("/sys/fs/cgroup/blkio/tasks") {
+		CgroupVersion.Blkio.Version = 1
+	} else {
+		CgroupVersion.Blkio.Version = 2
+	}
+
+	if PathExists("/sys/fs/cgroup/memory/tasks") {
+		CgroupVersion.Memory.Version = 1
+	} else {
+		CgroupVersion.Memory.Version = 2
+	}
+
+	f, err := os.Open("/proc/self/mountinfo")
+	if err == nil {
+		defer f.Close()
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			if err := s.Err(); err != nil {
+				break
+			}
+			fields := strings.Fields(s.Text())
+			if fields[len(fields) - 3] == "cgroup2" {
+				CgroupVersion.V2Root = filepath.Join(fields[4],fields[3])
+				break
+			}
+		}
+	}
+}
 
 // runningInUserNS detects whether we are currently running in a user namespace.
 // Copied from github.com/lxc/lxd/shared/util.go
@@ -238,6 +281,7 @@ func parseCgroupFromReader(r io.Reader) (map[string]string, error) {
 	var (
 		cgroups = make(map[string]string)
 		s       = bufio.NewScanner(r)
+		cgroupv2 string
 	)
 	for s.Scan() {
 		if err := s.Err(); err != nil {
@@ -253,9 +297,23 @@ func parseCgroupFromReader(r io.Reader) (map[string]string, error) {
 		for _, subs := range strings.Split(parts[1], ",") {
 			if subs != "" {
 				cgroups[subs] = parts[2]
+			} else {
+				// store cgroupv2 path temporarily
+				cgroupv2 = parts[2]
 			}
 		}
 	}
+		
+	// store controllers of memory/blkio if they are missing
+	_, ok := cgroups["memory"]
+	if !ok {
+		cgroups["memory"] = cgroupv2
+	}
+	_, ok = cgroups["blkio"]
+	if !ok {
+		cgroups["blkio"] = cgroupv2
+	}
+	
 	return cgroups, nil
 }
 
@@ -275,6 +333,12 @@ func getCgroupDestination(subsystem string) (string, error) {
 			if opt == subsystem {
 				return fields[3], nil
 			}
+		}
+		// added by yew: try cgroupv2
+		if fields[len(fields) - 3] == "cgroup2" &&
+			((CgroupVersion.Memory.Version == 2 && subsystem == "memory" ) ||
+			(CgroupVersion.Blkio.Version == 2 && subsystem == "blkio")) {
+			return fields[3], nil
 		}
 	}
 	return "", ErrNoCgroupMountDestination
@@ -321,4 +385,20 @@ func cleanPath(path string) string {
 		path, _ = filepath.Rel(string(os.PathSeparator), filepath.Clean(string(os.PathSeparator)+path))
 	}
 	return filepath.Clean(path)
+}
+
+func PathExists(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	return true
+}
+
+func GetSysMemSize() uint64 {
+	si := &syscall.Sysinfo_t{}
+	err := syscall.Sysinfo(si)
+	if err != nil {
+		return 0
+	}
+	return si.Totalram
 }

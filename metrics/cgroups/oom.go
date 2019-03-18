@@ -71,6 +71,10 @@ type oom struct {
 }
 
 func (o *oomCollector) Add(id, namespace string, cg cgroups.Cgroup, triggers ...Trigger) error {
+	// added by yew: cgroupv2 doesn't have this event
+	if cgroups.CgroupVersion.Memory.Version != 1 {
+		return nil
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	fd, err := cg.OOMEventFD()

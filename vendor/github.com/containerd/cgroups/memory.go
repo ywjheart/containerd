@@ -33,8 +33,14 @@ import (
 )
 
 func NewMemory(root string) *memoryController {
-	return &memoryController{
-		root: filepath.Join(root, string(Memory)),
+	if CgroupVersion.Memory.Version == 1 {
+		return &memoryController{
+			root: filepath.Join(root, string(Memory)),
+		}
+	} else {
+		return &memoryController{
+			root: CgroupVersion.V2Root,
+		}
 	}
 }
 
@@ -57,7 +63,10 @@ func (m *memoryController) Create(path string, resources *specs.LinuxResources) 
 	if resources.Memory == nil {
 		return nil
 	}
-	if resources.Memory.Kernel != nil {
+
+	// this setting is only for v1
+	if CgroupVersion.Memory.Version == 1 &&
+		resources.Memory.Kernel != nil {
 		// Check if kernel memory is enabled
 		// We have to limit the kernel memory here as it won't be accounted at all
 		// until a limit is set on the cgroup and limit cannot be set once the
@@ -109,6 +118,25 @@ func (m *memoryController) Stat(path string, stats *Metrics) error {
 		Kernel:    &MemoryEntry{},
 		KernelTCP: &MemoryEntry{},
 	}
+	if CgroupVersion.Memory.Version == 2 {
+		// get the system total memory
+		totalInBytes := GetSysMemSize()
+		memoryMax, _ := readUint(filepath.Join(m.Path(path),"memory.max"))
+		memoryUsage, _:= readUint(filepath.Join(m.Path(path),"memory.current"))
+
+		// it is mapped to 0 if it is max
+		if memoryMax > 0 &&
+			memoryMax < totalInBytes {
+			stats.Memory.Usage.Limit = memoryMax
+		} else {
+			stats.Memory.Usage.Limit = totalInBytes
+		}
+		stats.Memory.Usage.Usage = memoryUsage
+
+		return nil
+	}
+
+
 	if err := m.parseStats(f, stats.Memory); err != nil {
 		return err
 	}
